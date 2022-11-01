@@ -38,7 +38,7 @@ class ActorCallContext(object):
     Wraps the actor execution into child process.
     """
 
-    def __init__(self, definition, logger, messaging, config_model, skip_dialogs):
+    def __init__(self, definition, logger, messaging, config_model, skip_dialogs, sentry_client):
         """
         :param definition: Actor definition
         :type definition: :py:class:`leapp.repository.actor_definition.ActorDefinition`
@@ -54,9 +54,10 @@ class ActorCallContext(object):
         self.messaging = messaging
         self.config_model = config_model
         self.skip_dialogs = skip_dialogs
+        self.sentry_client = sentry_client
 
     @staticmethod
-    def _do_run(stdin, logger, messaging, definition, config_model, skip_dialogs, args, kwargs):
+    def _do_run(stdin, logger, messaging, definition, config_model, skip_dialogs, sentry_client, args, kwargs):
         if stdin is not None:
             try:
                 sys.stdin = os.fdopen(stdin)
@@ -69,7 +70,12 @@ class ActorCallContext(object):
                 target_actor = [actor for actor in get_actors() if actor.name == definition.name][0]
                 actor_instance = target_actor(logger=logger, messaging=messaging, config_model=config_model,
                                               skip_dialogs=skip_dialogs)
-                actor_instance.run(*args, **kwargs)
+                try:
+                    actor_instance.run(*args, **kwargs)
+                except:
+                    if sentry_client:
+                        sentry_client.captureException()
+                    raise
             try:
                 # By this time this is no longer set, so we have to get it back
                 os.environ['LEAPP_CURRENT_ACTOR'] = actor_instance.name
@@ -96,11 +102,14 @@ class ActorCallContext(object):
             stdin = sys.stdin.fileno()
         except UnsupportedOperation:
             stdin = None
+
+        # proc_queue = Queue(1)
         p = Process(target=self._do_run,
                     args=(stdin, self.logger, self.messaging, self.definition, self.config_model,
-                          self.skip_dialogs, args, kwargs))
+                          self.skip_dialogs, self.sentry_client, args, kwargs))
         p.start()
         p.join()
+        # result = proc_queue.get()
         if p.exitcode != 0:
             raise LeappRuntimeError(
                 'Actor {actorname} unexpectedly terminated with exit code: {exitcode}'
@@ -208,9 +217,9 @@ class ActorDefinition(object):
                     tag.actors += (self,)
         return self._discovery
 
-    def __call__(self, messaging=None, logger=None, config_model=None, skip_dialogs=False):
+    def __call__(self, messaging=None, logger=None, config_model=None, skip_dialogs=False, sentry_client=None):
         return ActorCallContext(definition=self, messaging=messaging, logger=logger, config_model=config_model,
-                                skip_dialogs=skip_dialogs)
+                                skip_dialogs=skip_dialogs, sentry_client=sentry_client)
 
     @property
     def dialogs(self):
